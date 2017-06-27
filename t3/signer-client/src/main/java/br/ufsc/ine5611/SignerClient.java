@@ -1,11 +1,11 @@
 package br.ufsc.ine5611;
 
 import org.apache.commons.io.output.CloseShieldOutputStream;
-
 import java.io.*;
 import java.util.Scanner;
 
 public class SignerClient {
+
     private Scanner scanner;
     private PrintStream ps;
 
@@ -19,9 +19,11 @@ public class SignerClient {
     }
 
     public void sign(File mappedFile) throws SignerException {
+
         ps.printf("SIGN %s\n", mappedFile.getAbsolutePath());
         while (scanner.hasNextLine()) {
             String line = scanner.nextLine();
+            System.out.println(line);
             if (line.equals("OK SIGN"))
                 break;
             if (line.equals("ERROR BEGIN SIGN")) {
@@ -40,4 +42,5 @@ public class SignerClient {
     public void end() {
         ps.printf("END\n");
     }
+
 }

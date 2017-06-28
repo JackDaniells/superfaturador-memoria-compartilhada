@@ -2,9 +2,7 @@ package br.ufsc.ine5611;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -13,86 +11,158 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
 
 public class App {
 
-    private static MappedByteBuffer mappedByteBuffer;
-    private static ArrayList<String> command;
+    private static int sizeLength = 4;
+    private static int hashLength = 32;
 
-    public static void main(String[] args){
+    public static void main(String[] args) throws IOException{
         
         try {
             
-            command = new ArrayList<>();
-            command.add(args[0]);
+            /*************************************************
+            * 
+            *      Pega os parametros passados como argumento
+            * 
+            *************************************************/
+            
+            //inicia o proccessBuilder com o path do signer
+            ProcessBuilder builder = new ProcessBuilder(args[0]);
+            
+            //cria o pipe in e o pipe out
+            builder.redirectInput(ProcessBuilder.Redirect.PIPE);
+            builder.redirectOutput(ProcessBuilder.Redirect.PIPE);
+            
+            //arquivo a ser superfaturado
             File file = new File(args[1]);
             
+            //inicializa os buffer onde o arquivo vai ser lido
+            byte[] buffer = new byte[(int) file.length()];    
             
-            ProcessBuilder processBuilder = new ProcessBuilder(command);
-            processBuilder.redirectInput(ProcessBuilder.Redirect.PIPE);
-            processBuilder.redirectOutput(ProcessBuilder.Redirect.PIPE);
+            //le o arquivo recebido
+            FileInputStream fs = new FileInputStream(file);
+            //aponta pro buffer onde o arquivo vai ser lido
+            fs.read(buffer);
+
+            /*************************************************
+            * 
+            *   cria o pacote e inicializa a memoria mapeada
+            * 
+            *************************************************/
             
             
-            Path pathToTemp = Files.createTempFile("temp", null);
+            long packSize = sizeLength + file.length() + hashLength;
             
-            FileChannel fileChannel = (FileChannel) Files.newByteChannel(
-                pathToTemp,
-                EnumSet.of(StandardOpenOption.READ, StandardOpenOption.WRITE)
+            //cria um arquivo vazio temporariamente
+            Path path = Files.createTempFile(null, null);
+            
+            //inicializa o fileChannel com o arquivo temporario
+            FileChannel ch = FileChannel.open(
+                    path, 
+                    StandardOpenOption.READ, 
+                    StandardOpenOption.WRITE
             );
             
-            mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, 4 + file.length() + 32);
-            fileChannel.close();
+            //inicializa o MappedByteBuffer com o tamanho do pacote
+            MappedByteBuffer mb = ch.map(FileChannel.MapMode.READ_WRITE, 0, packSize);
+            
+            //finaliza o FileChannel
+            ch.close();
+            
+            /*************************************************
+            * 
+            *            Popula a memoria mapeada
+            * 
+            *************************************************/
 
-            if (mappedByteBuffer != null) {
-                FileInputStream fileInputStream = new FileInputStream(file);
-                byte[] arrayBytes = new byte[(int) file.length()];
-                fileInputStream.read(arrayBytes);
-//                RandomAccessFile randomAccessFile = new RandomAccessFile(file, "r");
-//                byte[] arrayBytes = new byte[(int)randomAccessFile.length()];
-//                randomAccessFile.readFully(arrayBytes);
+            //posiciona o MappedByteBuffer
+            mb.position(0);
+            //escreve o tamanho do arquivo na posição 0
+            mb.putInt((int)file.length());
 
-                mappedByteBuffer.putInt(0, (int) file.length());
-
-                for (int i = 0; i < arrayBytes.length; i++) mappedByteBuffer.put(4 + i, arrayBytes[i]);
-
-                for (int i = 0; i < 32; i++) mappedByteBuffer.put(4 + (int) file.length() + i, (byte) 0);
-
+            //escreve o payload na memoria mapeada
+            for (int i = 0; i < buffer.length; i++){     
+                //posiciona o MappedByteBuffer
+                mb.position(sizeLength + i);
+                //escreve o buffer[i] na posição atual
+                mb.put(buffer[i]);
             }
             
-            final Process process = processBuilder.start();
+            /************************************************
+             * 
+             *  Inicia o signer e espera o processo terminar
+             * 
+             ************************************************/
             
+            //cria o processo
+            Process process = builder.start();
+            
+            //usa a classe SignerClient 
             SignerClient signerClient = new SignerClient(process.getOutputStream(), process.getInputStream());
-            
-            signerClient.sign(pathToTemp.toFile());
-            
+            signerClient.sign(path.toFile());
+                      
+            //espera pelo termino do processo
             process.waitFor();
             
+            //finaliza o signerClient
             signerClient.end();
             
-            byte[] signature = new byte[32];
+            /************************************************
+             * 
+             *         Pega o hash da memoria mapeada
+             * 
+            *************************************************/
+            
+            //inicia os bytes correspondentes ao hash
+            byte[] signature = new byte[hashLength];
 
+            //pega o hash da memoria mapeada
             for (int i = 0; i < signature.length; i++) {
-                signature[i] = mappedByteBuffer.get(4 + (int)file.length() + i);
+                long position = sizeLength + file.length() + i;
+                signature[i] = mb.get((int)position);
             }
 
+            //transforma signature numa string base 64 e a imprime
             System.out.println(Base64.getEncoder().encodeToString(signature));
             
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            /************************************************
+             * 
+             *               compara os hash
+             * 
+             ************************************************/
             
-            FileInputStream in = new FileInputStream(file);
             
-            while (in.available() > 0) md.update((byte) in.read());
+            //pega SHA-256 sem superfaturamento.
+            byte[] expectedSignature = getExpectedSignature(file);
 
-            byte[] originalFileSignature = md.digest();
-
-            System.out.println(Arrays.equals(originalFileSignature, signature)); 
+            //compara o hash lido da memória mapeada com o hash calculado sem superfaturamento
+            System.out.println(Arrays.equals(expectedSignature, signature)); 
            
+            
         //exception
-        } catch (SignerException | IOException | InterruptedException | NoSuchAlgorithmException ex) {
+        } catch (SignerException | InterruptedException ex) {
+            //imprime a exception
            System.err.println(ex.getMessage());
         }
+    }
+    
+    
+    //retorna o SHA-256 sem superfaturamento.
+    private static byte[] getExpectedSignature(File file) throws IOException {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("Unexpected exception", e);
+        }
+        try (FileInputStream in = new FileInputStream(file)) {
+            while (in.available() > 0) {
+                md.update((byte) in.read());
+            }
+        }
+        return md.digest();
     }
 
 }
